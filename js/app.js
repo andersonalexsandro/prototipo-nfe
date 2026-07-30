@@ -10,6 +10,7 @@ const NAV = [
   { route:'#integracoes', icon:'integracoes', label:'Integrações' },
   { route:'#relatorios',  icon:'relatorios',  label:'Relatórios' },
   { route:'#clientes',    icon:'clientes',    label:'Clientes' },
+  { route:'#produtos',    icon:'produtos',    label:'Produtos' },
   { route:'#config',      icon:'config',      label:'Configurações' },
 ];
 
@@ -68,7 +69,7 @@ function viewLogin(){
           <label>Senha</label>
           <input class="input" type="password" placeholder="Sua senha" value="demodemodemo">
         </div>
-        <a href="#dashboard" class="login__forgot">Esqueci minha senha</a>
+        <a href="#recuperar" class="login__forgot">Esqueci minha senha</a>
         <div style="height:14px"></div>
         <button class="btn block" type="submit">Entrar</button>
       </form>
@@ -80,105 +81,226 @@ function viewLogin(){
   });
 }
 
-/* ---------- Componentes reutilizáveis ---------- */
-function statCard(title, value, {money=false, neg=false, delta=''}={}){
-  const num = money
-    ? `<div class="num money${neg?' neg':''}"><small>R$</small> ${Number(value).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>`
-    : `<div class="num${neg?' neg':''}">${Number(value).toLocaleString('pt-BR')}</div>`;
-  return `<div class="stat"><h4>${title}</h4>${num}${delta?`<div class="delta">${delta}</div>`:''}</div>`;
+/* ---------- Recuperação de senha -------------------------------------------
+   Tela criada em resposta ao Teste de Usabilidade: o link "Esqueci minha senha"
+   apontava para o dashboard, ou seja, dava acesso à conta sem autenticar.     */
+function viewRecuperar(){
+  app.innerHTML = `
+  <div class="login">
+    <div class="login__aside">
+      <div class="login__brand">${logoSVG('dark', 1.5)}</div>
+      ${loginArt()}
+    </div>
+    <div class="login__main">
+      <form class="login__form" id="recForm">
+        <h1>Recuperar acesso</h1>
+        <p class="sub">Enviaremos um link de redefinição para o seu e-mail</p>
+        <div class="field">
+          <label for="recEmail">E-mail cadastrado</label>
+          <input class="input" id="recEmail" type="email" placeholder="seu@email.com" required>
+        </div>
+        <div id="recAviso" class="aviso" hidden></div>
+        <button class="btn block" type="submit">Enviar link de redefinição</button>
+        <div style="height:14px"></div>
+        <a href="#login" class="login__forgot">Voltar para o login</a>
+      </form>
+    </div>
+  </div>`;
+  document.getElementById('recForm').addEventListener('submit', e => {
+    e.preventDefault();
+    const email = document.getElementById('recEmail').value.trim();
+    const aviso = document.getElementById('recAviso');
+    aviso.hidden = false;
+    aviso.className = 'aviso ok';
+    aviso.innerHTML = `Se <b>${esc(email)}</b> estiver cadastrado, o link de redefinição chegará em alguns minutos.
+      Verifique também a caixa de spam.`;
+    toast('Link de redefinição enviado (demo).', 'ok');
+  });
 }
-function statusBadge(s){ return `<span class="status ${s==='Autorizada'?'ok':'no'}">${s}</span>`; }
+
+/* ---------- Componentes reutilizáveis ---------- */
+function statCard(title, value, {money=false, neg=false, delta='', primary=false}={}){
+  const alerta = neg && Number(value) > 0;   // zero rejeitadas não é um alerta
+  const num = money
+    ? `<div class="num money${alerta?' neg':''}"><small>R$</small> ${Number(value).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>`
+    : `<div class="num${alerta?' neg':''}">${Number(value).toLocaleString('pt-BR')}</div>`;
+  return `<div class="stat${primary?' stat--primary':''}"><h4>${title}</h4>${num}${delta?`<div class="delta">${delta}</div>`:''}</div>`;
+}
+const STATUS_CLASS = { 'Autorizada':'ok', 'Rejeitada':'no', 'Cancelada':'warn' };
+function statusBadge(s){ return `<span class="status ${STATUS_CLASS[s]||'no'}">${s}</span>`; }
+
+/* ---------- Filtro de período (componente único) ----------------------------
+   Antes cada tela declarava o seu próprio <select> de período e três deles
+   (Dashboard2, Consultar, Relatórios) não filtravam nada — defeito relatado no
+   Teste de Usabilidade de 14/07/2026. Agora há um componente e uma função só. */
+const PERIODOS = [
+  { v:'hoje', label:'Hoje' },
+  { v:'7',    label:'Últimos 7 dias' },
+  { v:'mes',  label:'Este mês' },
+  { v:'tudo', label:'Tudo' },
+  { v:'custom', label:'Intervalo personalizado' },
+];
+/* A pílula compacta (Dashboard/Relatórios) só oferece os presets — o intervalo
+   personalizado exige dois campos de data e vive na tela de Consultar Notas. */
+function periodoPill(id, sel){
+  const opts = PERIODOS.filter(p => p.v !== 'custom')
+    .map(p => `<option value="${p.v}" ${p.v===sel?'selected':''}>${p.label}</option>`).join('');
+  return `<span class="pill"><label for="${id}">Período:</label>
+    <select id="${id}" aria-label="Filtrar notas por período">${opts}</select></span>`;
+}
+const parseBR = s => { const [d,m,y] = s.split('/').map(Number); return new Date(y, m-1, d); };
+/* Converte o valor de um <input type="date"> (AAAA-MM-DD) em Date local.
+   `new Date('2026-07-30')` seria interpretado como UTC e, em fuso negativo,
+   voltaria um dia — era essa a origem das notas que "sumiam" da borda do filtro. */
+const parseISO = s => { const [y,m,d] = s.split('-').map(Number); return new Date(y, m-1, d); };
+const diaDe = d => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
+/**
+ * Filtra notas por período. `range` = {de, ate} em AAAA-MM-DD, só p/ 'custom'.
+ * Todos os intervalos são fechados nas duas pontas (a nota do dia "até" entra).
+ */
+function filtrarNotas(periodo, notas = Store.notas, range = null){
+  if (periodo === 'tudo') return notas;
+  const hoje = Store.HOJE;
+
+  if (periodo === 'hoje') return notas.filter(n => n.data === Store.fmtBR(hoje));
+  if (periodo === 'mes')  return notas.filter(n => n.data.slice(3) === Store.fmtBR(hoje).slice(3));
+  if (periodo === '7'){
+    const inicio = new Date(hoje); inicio.setDate(inicio.getDate() - 6);
+    // O limite superior faltava: uma nota com data futura entrava em "últimos 7 dias".
+    return notas.filter(n => { const d = parseBR(n.data); return d >= inicio && d <= hoje; });
+  }
+  if (periodo === 'custom'){
+    if (!range || (!range.de && !range.ate)) return notas;   // intervalo vazio = sem filtro
+    const de  = range.de  ? parseISO(range.de)  : null;
+    const ate = range.ate ? parseISO(range.ate) : null;
+    if (de && ate && de > ate) return [];                    // intervalo invertido não casa nada
+    return notas.filter(n => {
+      const d = diaDe(parseBR(n.data));
+      return (!de || d >= de) && (!ate || d <= ate);
+    });
+  }
+  return notas;
+}
+function wirePeriodo(id, valor, onChange){
+  const sel = document.getElementById(id);
+  if (!sel) return;
+  sel.value = valor;
+  sel.addEventListener('change', e => onChange(e.target.value));
+}
+const rotuloPeriodo = v => (PERIODOS.find(p => p.v === v) || {}).label || '';
 
 /* ---------- Dashboard (frame DashBoard) ---------- */
 let dashPeriodo = 'mes';
-function filtrarNotas(periodo){
-  const ns = Store.notas;
-  if (periodo === 'tudo') return ns;
-  const ref = '25/02/2026';
-  if (periodo === 'hoje') return ns.filter(n => n.data === ref);
-  if (periodo === 'mes')  return ns.filter(n => n.data.slice(3) === '02/2026');
-  if (periodo === '7')    return ns.filter(n => ['25/02/2026','24/02/2026','20/02/2026'].includes(n.data));
-  return ns;
-}
 function viewDashboard(){
-  const h = Store.headline;
+  const ultima = Store.notas.find(n => n.status === 'Autorizada');
   const content = `
     <div class="page-head">
-      <h2>Resumo Geral</h2>
-      <span class="pill">Período:
-        <select id="periodo">
-          <option value="hoje">Hoje</option>
-          <option value="7">Últimos 7 dias</option>
-          <option value="mes" selected>Este mês</option>
-          <option value="tudo">Tudo</option>
-        </select>
-      </span>
+      <div>
+        <h2>Resumo Geral</h2>
+        <p class="page-sub">Acompanhe as emissões e o faturamento do período selecionado.</p>
+      </div>
+      ${periodoPill('periodo', dashPeriodo)}
     </div>
-    <div class="stats">
-      ${statCard('Notas emitidas (Mês)', h.emitidasMes, {delta:'<span class="up">+12%</span> em relação a ontem'})}
-      ${statCard('Notas autorizadas', h.autorizadas, {delta:'<span class="up">+8%</span> em relação a ontem'})}
-      ${statCard('Notas canceladas', h.canceladas, {delta:'<span class="down">-4%</span> em relação a ontem'})}
-      ${statCard('Total faturado (Mês)', h.faturadoMes, {money:true, delta:'<span class="up">+1%</span> em relação ao mês anterior'})}
-    </div>
+    <div class="stats" id="dashStats"></div>
     <div class="dash-grid">
       <div class="table-card">
-        <table class="tbl"><thead><tr>
-          <th>Número</th><th>Destinatário</th><th>Valor</th><th>Data</th><th>Status</th>
-        </tr></thead><tbody id="dashRows"></tbody></table>
+        <div class="card-head">
+          <h3>Últimas notas emitidas</h3>
+          <a href="#consultar" class="link-more">Ver todas</a>
+        </div>
+        <div style="overflow-x:auto">
+          <table class="tbl"><thead><tr>
+            <th>Número</th><th>Destinatário</th><th>Valor</th><th>Data</th><th>Status</th>
+          </tr></thead><tbody id="dashRows"></tbody></table>
+        </div>
       </div>
       <div class="side-cards">
         <div class="mini-card">
           <h4>Status dos Provedores</h4>
           ${Store.provedores.map(p=>`
             <div class="prov">
-              <div class="name">${esc(p.nome)}${p.tag?` <span class="muted" style="font-size:15px;font-weight:500">(${p.tag})</span>`:''}</div>
+              <div class="name">${esc(p.nome)}${p.tag?` <span class="muted prov__tag">(${p.tag})</span>`:''}</div>
               <div class="st on">${p.status}</div>
             </div>`).join('')}
         </div>
-        <div class="mini-card" style="text-align:center">
+        <div class="mini-card">
           <h4>Alertas Recentes</h4>
-          <p class="alert-line">Notas emitidas hoje: <b>${h.emitidasHoje}</b></p>
-          <p class="alert-line">Última nota autorizada há <b>2 minutos</b></p>
+          <p class="alert-line" id="alertaHoje"></p>
+          <p class="alert-line">Última nota autorizada: ${ultima
+            ? `<b>nº ${ultima.numero}</b> em ${ultima.data} às ${ultima.hora}`
+            : '<b>nenhuma</b>'}</p>
         </div>
       </div>
     </div>`;
   app.innerHTML = shell('#dashboard', content);
-  const renderRows = () => {
-    const rows = filtrarNotas(dashPeriodo).slice(0,6);
+
+  // Cartões e tabela respondem ao mesmo filtro — antes os cartões eram fixos.
+  const renderDash = () => {
+    const sel  = filtrarNotas(dashPeriodo);
+    const aut  = sel.filter(n => n.status === 'Autorizada');
+    const rot  = rotuloPeriodo(dashPeriodo).toLowerCase();
+    const faturado = aut.reduce((s,n) => s + n.valor, 0);
+
+    document.getElementById('dashStats').innerHTML = [
+      statCard('Notas emitidas',   sel.length,                              {delta:`no período: ${rot}`}),
+      statCard('Notas autorizadas',aut.length,                              {delta:`${sel.length?Math.round(aut.length/sel.length*100):0}% do total emitido`}),
+      statCard('Rejeitadas / canceladas', sel.filter(n=>n.status!=='Autorizada').length, {neg:true, delta:'exigem reemissão ou registro'}),
+      statCard('Total faturado',   faturado,                                {money:true, primary:true, delta:`soma das notas autorizadas — ${rot}`}),
+    ].join('');
+
+    const rows = sel.slice(0,6);
     document.getElementById('dashRows').innerHTML = rows.length ? rows.map(n=>`
       <tr><td>${n.numero}</td><td>${esc(n.cliente)}</td><td>${BRL(n.valor)}</td><td>${n.data}</td><td>${statusBadge(n.status)}</td></tr>
-    `).join('') : `<tr><td colspan="5" class="muted center">Nenhuma nota no período.</td></tr>`;
+    `).join('') : `<tr><td colspan="5" class="muted center">Nenhuma nota no período selecionado.</td></tr>`;
+
+    document.getElementById('alertaHoje').innerHTML =
+      `Notas emitidas hoje: <b>${Store.headline.emitidasHoje}</b>`;
   };
-  const sel = document.getElementById('periodo');
-  sel.value = dashPeriodo;
-  sel.addEventListener('change', e => { dashPeriodo = e.target.value; renderRows(); });
-  renderRows();
+
+  wirePeriodo('periodo', dashPeriodo, v => { dashPeriodo = v; renderDash(); });
+  renderDash();
   wireShell();
 }
 
 /* ---------- Dashboard2 (frame DashBoard2) ---------- */
+let dash2Periodo = 'mes';
 function viewDashboard2(){
-  const h = Store.headline;
-  const rows = Store.notas.slice(0,8).map(n=>`
-    <tr><td>${n.numero}</td><td>${esc(n.cliente)}</td><td>${BRL(n.valor)}</td><td>${n.data} ${n.hora||''}</td><td>${statusBadge(n.status)}</td></tr>
-  `).join('');
   const content = `
     <div class="page-head">
-      <h2>Resumo Geral</h2>
-      <span class="pill">Período: <select><option>Hoje</option><option>Este mês</option></select></span>
+      <div>
+        <h2>Resumo Geral</h2>
+        <p class="page-sub">Visão detalhada — emissões, rejeições e faturamento.</p>
+      </div>
+      ${periodoPill('periodo2', dash2Periodo)}
     </div>
-    <div class="stats">
-      ${statCard('Notas emitidas Hoje', h.emitidasHoje, {delta:'<span class="up">+12%</span> em relação a ontem'})}
-      ${statCard('Notas emitidas Mês', h.emitidasMes, {delta:'<span class="up">+8%</span> em relação a ontem'})}
-      ${statCard('Notas rejeitadas Hoje', h.rejeitadasHoje, {neg:true, delta:'<span class="down">-4%</span> em relação a ontem'})}
-      ${statCard('Total faturado Mês', h.faturadoMes, {money:true, delta:'<span class="up">+1%</span> em relação ao mês anterior'})}
-    </div>
+    <div class="stats" id="dash2Stats"></div>
     <div class="table-card">
-      <table class="tbl"><thead><tr>
-        <th>Nº de notas</th><th>Cliente</th><th>Valor</th><th>Data</th><th>Status</th>
-      </tr></thead><tbody>${rows}</tbody></table>
+      <div class="card-head"><h3>Notas do período</h3></div>
+      <div style="overflow-x:auto">
+        <table class="tbl"><thead><tr>
+          <th>Número</th><th>Cliente</th><th>Valor</th><th>Data</th><th>Status</th>
+        </tr></thead><tbody id="dash2Rows"></tbody></table>
+      </div>
     </div>`;
   app.innerHTML = shell('#dashboard', content);
+
+  const render = () => {
+    const sel = filtrarNotas(dash2Periodo);
+    const aut = sel.filter(n => n.status === 'Autorizada');
+    const rot = rotuloPeriodo(dash2Periodo).toLowerCase();
+    document.getElementById('dash2Stats').innerHTML = [
+      statCard('Notas emitidas hoje', Store.headline.emitidasHoje, {delta:'referência: hoje'}),
+      statCard('Notas no período',    sel.length,                  {delta:rot}),
+      statCard('Rejeitadas no período', sel.filter(n=>n.status==='Rejeitada').length, {neg:true, delta:'precisam de reemissão'}),
+      statCard('Total faturado',      aut.reduce((s,n)=>s+n.valor,0), {money:true, primary:true, delta:`notas autorizadas — ${rot}`}),
+    ].join('');
+    document.getElementById('dash2Rows').innerHTML = sel.length ? sel.slice(0,8).map(n=>`
+      <tr><td>${n.numero}</td><td>${esc(n.cliente)}</td><td>${BRL(n.valor)}</td><td>${n.data} ${n.hora||''}</td><td>${statusBadge(n.status)}</td></tr>
+    `).join('') : `<tr><td colspan="5" class="muted center">Nenhuma nota no período selecionado.</td></tr>`;
+  };
+  wirePeriodo('periodo2', dash2Periodo, v => { dash2Periodo = v; render(); });
+  render();
   wireShell();
 }
 
@@ -191,22 +313,38 @@ function viewEmitir(){
     .concat(Store.clientes.map(c=>`<option value="${c.id}" ${emitState.clienteId===c.id?'selected':''}>${esc(c.nome)} — ${esc(c.doc)}</option>`)).join('');
   const content = `
     <div class="page-head">
-      <h2>Emitir Nota Fiscal</h2>
+      <div>
+        <h2>Emitir Nota Fiscal</h2>
+        <p class="page-sub">Destinatário, itens e transmissão em <b>uma única tela</b> — sem etapas intermediárias.</p>
+      </div>
       <button class="btn" id="btnEmitir">Emitir Nota</button>
     </div>
     <div class="emit-grid">
       <div>
+        <!-- US07 — vendas que se repetem todo mês não precisam ser remontadas. -->
         <div class="card" style="margin-bottom:22px">
-          <h3 style="font-size:22px;margin-bottom:18px">Destinatário</h3>
-          <div class="field"><label>Cliente</label>
+          <div class="card-head"><h3>Modelo de venda recorrente</h3></div>
+          <div class="row" style="align-items:end">
+            <div class="field" style="margin:0"><label for="emitModelo">Carregar modelo salvo</label>
+              <select class="input" id="emitModelo">
+                <option value="">Começar do zero…</option>
+                ${Store.modelos.map(m=>`<option value="${m.id}">${esc(m.nome)}</option>`).join('')}
+              </select></div>
+            <div class="field" style="margin:0;flex:none">
+              <button class="btn ghost" type="button" id="btnSalvarModelo">${ICON.save} Salvar como modelo</button></div>
+          </div>
+        </div>
+        <div class="card" style="margin-bottom:22px">
+          <div class="card-head"><h3>Destinatário</h3></div>
+          <div class="field"><label for="emitCliente">Cliente</label>
             <select class="input" id="emitCliente">${clienteOpts}</select>
           </div>
           <div class="row">
-            <div class="field"><label>Natureza da operação</label>
-              <select class="input"><option>Venda de mercadoria</option><option>Prestação de serviço</option><option>Devolução</option></select>
+            <div class="field"><label for="emitNatureza">Natureza da operação</label>
+              <select class="input" id="emitNatureza"><option>Venda de mercadoria</option><option>Prestação de serviço</option><option>Devolução</option></select>
             </div>
-            <div class="field"><label>Data de emissão</label>
-              <input class="input" type="text" value="25/02/2026" readonly>
+            <div class="field"><label for="emitData">Data de emissão</label>
+              <input class="input" id="emitData" type="text" value="${Store.fmtBR(Store.HOJE)}" readonly>
             </div>
           </div>
         </div>
@@ -251,7 +389,7 @@ function viewEmitir(){
       <td><input class="input" data-f="vu" type="number" min="0" step="0.01" value="${Number(it.valorUnit).toFixed(2)}" style="width:120px"></td>
       <td data-c="total">${BRL(it.qtd*it.valorUnit)}</td>
       <td data-c="trib"><span class="tag">${trib}</span></td>
-      <td><button class="iconbtn del" data-f="rm" title="Remover">${ICON.trash}</button></td>
+      <td><button class="iconbtn del" data-f="rm" type="button" aria-label="Remover item ${esc(p.descricao||'sem produto')}" title="Remover item da nota">${ICON.trash}</button></td>
     </tr>`;
   }
   function renderItens(){
@@ -311,6 +449,26 @@ function viewEmitir(){
     syncState(); emitState.itens.push({ produtoId:'', qtd:1, valorUnit:0 }); renderItens();
   });
   document.getElementById('emitCliente').addEventListener('change', e=> emitState.clienteId=e.target.value);
+  document.getElementById('emitModelo').addEventListener('change', e=>{
+    const m = Store.findModelo(e.target.value);
+    if (!m) return;
+    // Cópia dos itens: editar a nota não pode alterar o modelo salvo.
+    emitState.clienteId = m.clienteId;
+    emitState.itens = m.itens.map(it => ({ ...it }));
+    document.getElementById('emitCliente').value = m.clienteId;
+    renderItens();
+    toast(`Modelo “${m.nome}” carregado. Revise e emita.`, 'ok');
+  });
+  document.getElementById('btnSalvarModelo').addEventListener('click', ()=>{
+    syncState();
+    if (!emitState.clienteId) return toast('Selecione o cliente antes de salvar o modelo.', 'err');
+    if (!emitState.itens.some(it => it.produtoId)) return toast('Adicione ao menos um item ao modelo.', 'err');
+    const nome = prompt('Nome do modelo de venda recorrente:');
+    if (!nome || !nome.trim()) return;
+    Store.addModelo({ nome: nome.trim(), clienteId: emitState.clienteId, itens: emitState.itens.map(it=>({...it})) });
+    toast(`Modelo “${nome.trim()}” salvo.`, 'ok');
+    location.hash = '#emitir'; router();      // recarrega a lista de modelos
+  });
   document.getElementById('btnEmitir').addEventListener('click', ()=>{
     syncState();
     const cli = Store.findCliente(emitState.clienteId);
@@ -332,34 +490,41 @@ let cliEdit = null;        // id em edição
 let cliBusca = '';
 function viewClientes(){
   const content = `
-    <div class="page-head"><h2>Cadastrar Cliente</h2></div>
+    <div class="page-head">
+      <div>
+        <h2>Clientes</h2>
+        <p class="page-sub">Cadastre uma vez e reutilize os dados em todas as próximas notas.</p>
+      </div>
+    </div>
     <div class="card card-lg" style="margin-bottom:26px">
+      <div class="card-head"><h3 id="cliFormTitulo">Cadastrar cliente</h3></div>
       <form id="cliForm">
-        <div class="field"><label>Nome/Razão Social</label>
+        <div class="field"><label for="cNome">Nome/Razão Social</label>
           <input class="input" id="cNome" placeholder="Nome Exemplo" required></div>
-        <div class="field"><label>Email</label>
+        <div class="field"><label for="cEmail">Email</label>
           <input class="input" id="cEmail" type="email" placeholder="emailexemplo@email.com"></div>
         <div class="row">
-          <div class="field"><label>CPF/CNPJ</label>
+          <div class="field"><label for="cDoc">CPF/CNPJ</label>
             <input class="input" id="cDoc" placeholder="12.345.678/0001-95"></div>
-          <div class="field"><label>Inscrição Estadual</label>
+          <div class="field"><label for="cIe">Inscrição Estadual</label>
             <input class="input" id="cIe" placeholder="16.123456.1"></div>
-          <div class="field" style="max-width:200px"><label>Situação</label>
+          <div class="field" style="max-width:200px"><label for="cSit">Situação</label>
             <select class="input" id="cSit"><option>Ativa</option><option>Inativa</option></select></div>
         </div>
-        <div style="display:flex;gap:14px;justify-content:center;margin-top:8px">
-          <button class="btn icon" type="submit" title="Salvar">${ICON.save}</button>
-          <button class="btn icon" type="button" id="cLimpar" title="Excluir/Limpar">${ICON.trash}</button>
+        <div class="form-actions">
+          <button class="btn" type="submit">${ICON.save} <span id="cliSubmitLbl">Salvar cliente</span></button>
+          <button class="btn ghost" type="button" id="cLimpar">Limpar formulário</button>
         </div>
       </form>
     </div>
 
-    <div class="page-head"><h2>Buscar Cliente</h2></div>
     <div class="card card-lg">
+      <div class="card-head"><h3>Clientes cadastrados</h3></div>
       <div style="max-width:380px;margin-bottom:18px">
-        <div style="position:relative">
-          <input class="input" id="cBusca" placeholder="Buscar por nome ou documento…" value="${esc(cliBusca)}" style="padding-right:44px">
-          <span class="in-ic" style="position:absolute;right:14px;top:50%;transform:translateY(-50%);color:#9aa">${ICON.consultar}</span>
+        <label class="sr-only" for="cBusca">Buscar cliente</label>
+        <div class="input-ic">
+          <input class="input" id="cBusca" placeholder="Buscar por nome ou documento…" value="${esc(cliBusca)}">
+          <span class="in-ic" aria-hidden="true">${ICON.consultar}</span>
         </div>
       </div>
       <div style="overflow-x:auto">
@@ -371,9 +536,27 @@ function viewClientes(){
   app.innerHTML = shell('#clientes', content);
 
   const form = document.getElementById('cliForm');
-  const fields = { nome:'cNome', email:'cEmail', doc:'cDoc', ie:'cIe', situacao:'cSit' };
-  const loadForm = c => { document.getElementById('cNome').value=c.nome; document.getElementById('cEmail').value=c.email||''; document.getElementById('cDoc').value=c.doc||''; document.getElementById('cIe').value=c.ie||''; document.getElementById('cSit').value=c.situacao||'Ativa'; cliEdit=c.id; };
-  const clearForm = () => { form.reset(); cliEdit=null; };
+  const titulo = document.getElementById('cliFormTitulo');
+  const submitLbl = document.getElementById('cliSubmitLbl');
+  const setModo = editando => {
+    titulo.textContent = editando ? 'Editar cliente' : 'Cadastrar cliente';
+    submitLbl.textContent = editando ? 'Salvar alterações' : 'Salvar cliente';
+  };
+  const loadForm = c => {
+    document.getElementById('cNome').value=c.nome;
+    document.getElementById('cEmail').value=c.email||'';
+    document.getElementById('cDoc').value=c.doc||'';
+    document.getElementById('cIe').value=c.ie||'';
+    document.getElementById('cSit').value=c.situacao||'Ativa';
+    cliEdit=c.id; setModo(true);
+  };
+  const clearForm = () => { form.reset(); cliEdit=null; setModo(false); };
+  // RN02 — duplicidade é verificada pelo documento, ignorando pontuação.
+  const soDigitos = s => (s||'').replace(/\D/g,'');
+  const docDuplicado = (doc, ignorarId) => {
+    const d = soDigitos(doc);
+    return d && Store.clientes.some(c => c.id !== ignorarId && soDigitos(c.doc) === d);
+  };
 
   function renderRows(){
     const q = cliBusca.trim().toLowerCase();
@@ -383,8 +566,8 @@ function viewClientes(){
         <td>${esc(c.nome)}</td><td>${esc(c.doc)}</td><td>${esc(c.ie||'—')}</td>
         <td><span class="status ${c.situacao==='Ativa'?'ok':'no'}">${c.situacao}</span></td>
         <td><div class="actions">
-          <button class="iconbtn" data-edit="${c.id}" title="Editar">${ICON.save}</button>
-          <button class="iconbtn del" data-del="${c.id}" title="Excluir">${ICON.trash}</button>
+          <button class="iconbtn" data-edit="${c.id}" aria-label="Editar ${esc(c.nome)}" title="Editar cliente">${ICON.edit}</button>
+          <button class="iconbtn del" data-del="${c.id}" aria-label="Excluir ${esc(c.nome)}" title="Excluir cliente">${ICON.trash}</button>
         </div></td>
       </tr>`).join('') : `<tr><td colspan="5" class="muted center">Nenhum cliente encontrado.</td></tr>`;
   }
@@ -392,14 +575,15 @@ function viewClientes(){
     e.preventDefault();
     const data = { nome:cNome.value.trim(), email:cEmail.value.trim(), doc:cDoc.value.trim(), ie:cIe.value.trim(), situacao:cSit.value };
     if (!data.nome) return toast('Informe o nome/razão social.', 'err');
+    if (docDuplicado(data.doc, cliEdit))
+      return toast('Já existe um cliente com esse CPF/CNPJ. Edite o cadastro existente.', 'err');
     if (cliEdit){ Store.updateCliente(cliEdit, data); toast('Cliente atualizado.', 'ok'); }
     else { Store.addCliente(data); toast('Cliente cadastrado.', 'ok'); }
     clearForm(); renderRows();
   });
-  document.getElementById('cLimpar').addEventListener('click', ()=>{
-    if (cliEdit){ Store.removeCliente(cliEdit); toast('Cliente excluído.', 'ok'); clearForm(); renderRows(); }
-    else clearForm();
-  });
+  // Antes este botão excluía o cliente quando o formulário estava em edição —
+  // ação destrutiva atrás de um rótulo de "limpar". Exclusão agora só na tabela.
+  document.getElementById('cLimpar').addEventListener('click', clearForm);
   document.getElementById('cBusca').addEventListener('input', e=>{ cliBusca=e.target.value; renderRows(); });
   document.getElementById('cliRows').addEventListener('click', e=>{
     const ed=e.target.closest('[data-edit]'); const dl=e.target.closest('[data-del]');
@@ -410,26 +594,183 @@ function viewClientes(){
   wireShell();
 }
 
+/* ---------- Produtos e regras fiscais (US04) --------------------------------
+   UC02 "Gerenciar Catálogo de Produtos" + fluxo "Cadastro de Produtos e Regras
+   Fiscais". É o cadastro que sustenta o auto-preenchimento da nota (US06):
+   NCM, CFOP e alíquotas vêm daqui quando o produto é escolhido na emissão.   */
+let prodEdit = null;
+let prodBusca = '';
+function viewProdutos(){
+  const content = `
+    <div class="page-head">
+      <div>
+        <h2>Produtos e Regras Fiscais</h2>
+        <p class="page-sub">NCM, CFOP e alíquotas ficam no produto — na emissão a nota se preenche <b>sozinha</b>.</p>
+      </div>
+    </div>
+    <div class="card card-lg" style="margin-bottom:26px">
+      <div class="card-head"><h3 id="prodFormTitulo">Cadastrar produto</h3></div>
+      <form id="prodForm">
+        <div class="field"><label for="pDesc">Descrição do produto ou serviço</label>
+          <input class="input" id="pDesc" placeholder="Notebook 14&quot;" required></div>
+        <div class="row">
+          <div class="field"><label for="pNcm">NCM</label>
+            <input class="input" id="pNcm" placeholder="8471.30.12"></div>
+          <div class="field"><label for="pCfop">CFOP</label>
+            <input class="input" id="pCfop" placeholder="5102"></div>
+          <div class="field"><label for="pVu">Valor unitário (R$)</label>
+            <input class="input" id="pVu" type="number" min="0" step="0.01" placeholder="0,00"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label for="pIcms">ICMS (%)</label>
+            <input class="input" id="pIcms" type="number" min="0" max="100" step="0.01" value="0"></div>
+          <div class="field"><label for="pPis">PIS (%)</label>
+            <input class="input" id="pPis" type="number" min="0" max="100" step="0.01" value="0"></div>
+          <div class="field"><label for="pCofins">COFINS (%)</label>
+            <input class="input" id="pCofins" type="number" min="0" max="100" step="0.01" value="0"></div>
+        </div>
+        <label class="check" style="margin-bottom:18px">
+          <input type="checkbox" id="pIsento">
+          <span>Isenção recorrente de ICMS</span>
+        </label>
+        <div class="form-actions">
+          <button class="btn" type="submit">${ICON.save} <span id="prodSubmitLbl">Salvar produto</span></button>
+          <button class="btn ghost" type="button" id="pLimpar">Limpar formulário</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card card-lg">
+      <div class="card-head"><h3>Catálogo cadastrado</h3></div>
+      <div style="max-width:380px;margin-bottom:18px">
+        <label class="sr-only" for="pBusca">Buscar produto</label>
+        <div class="input-ic">
+          <input class="input" id="pBusca" placeholder="Buscar por descrição ou NCM…" value="${esc(prodBusca)}">
+          <span class="in-ic" aria-hidden="true">${ICON.consultar}</span>
+        </div>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="tbl"><thead><tr>
+          <th>Descrição</th><th>NCM</th><th>CFOP</th><th>Valor unit.</th><th>Tributação</th><th>Ações</th>
+        </tr></thead><tbody id="prodRows"></tbody></table>
+      </div>
+    </div>`;
+  app.innerHTML = shell('#produtos', content);
+
+  const form = document.getElementById('prodForm');
+  const titulo = document.getElementById('prodFormTitulo');
+  const submitLbl = document.getElementById('prodSubmitLbl');
+  const setModo = editando => {
+    titulo.textContent = editando ? 'Editar produto' : 'Cadastrar produto';
+    submitLbl.textContent = editando ? 'Salvar alterações' : 'Salvar produto';
+  };
+  const loadForm = p => {
+    pDesc.value = p.descricao; pNcm.value = p.ncm||''; pCfop.value = p.cfop||'';
+    pVu.value = p.valorUnit ?? ''; pIcms.value = p.icms ?? 0;
+    pPis.value = p.pis ?? 0; pCofins.value = p.cofins ?? 0; pIsento.checked = !!p.isento;
+    pIcms.disabled = !!p.isento;
+    prodEdit = p.id; setModo(true);
+  };
+  const clearForm = () => { form.reset(); pIcms.disabled = false; prodEdit = null; setModo(false); };
+
+  function renderRows(){
+    const q = prodBusca.trim().toLowerCase();
+    const list = Store.produtos.filter(p => !q
+      || p.descricao.toLowerCase().includes(q) || (p.ncm||'').toLowerCase().includes(q));
+    document.getElementById('prodRows').innerHTML = list.length ? list.map(p=>`
+      <tr>
+        <td>${esc(p.descricao)}</td><td>${esc(p.ncm||'—')}</td><td>${esc(p.cfop||'—')}</td>
+        <td>${BRL(p.valorUnit||0)}</td>
+        <td><span class="tag">${p.isento ? 'Isento' : `ICMS ${p.icms||0}%`}</span></td>
+        <td><div class="actions">
+          <button class="iconbtn" data-edit="${p.id}" aria-label="Editar ${esc(p.descricao)}" title="Editar produto">${ICON.edit}</button>
+          <button class="iconbtn del" data-del="${p.id}" aria-label="Excluir ${esc(p.descricao)}" title="Excluir produto">${ICON.trash}</button>
+        </div></td>
+      </tr>`).join('') : `<tr><td colspan="6" class="muted center">Nenhum produto encontrado.</td></tr>`;
+  }
+
+  form.addEventListener('submit', e=>{
+    e.preventDefault();
+    const descricao = pDesc.value.trim();
+    if (!descricao) return toast('Informe a descrição do produto.', 'err');
+    const isento = pIsento.checked;
+    const data = {
+      descricao,
+      ncm: pNcm.value.trim(), cfop: pCfop.value.trim(),
+      valorUnit: parseFloat(pVu.value)||0,
+      // Isenção e alíquota de ICMS são contraditórias: a isenção manda.
+      icms: isento ? 0 : (parseFloat(pIcms.value)||0),
+      pis: parseFloat(pPis.value)||0,
+      cofins: parseFloat(pCofins.value)||0,
+      isento,
+    };
+    if (prodEdit){ Store.updateProduto(prodEdit, data); toast('Produto atualizado.', 'ok'); }
+    else { Store.addProduto(data); toast('Produto cadastrado.', 'ok'); }
+    clearForm(); renderRows();
+  });
+  document.getElementById('pLimpar').addEventListener('click', clearForm);
+  document.getElementById('pBusca').addEventListener('input', e=>{ prodBusca=e.target.value; renderRows(); });
+  document.getElementById('prodRows').addEventListener('click', e=>{
+    const ed=e.target.closest('[data-edit]'), dl=e.target.closest('[data-del]');
+    if (ed){ loadForm(Store.findProduto(ed.dataset.edit)); window.scrollTo({top:0,behavior:'smooth'}); }
+    if (dl){
+      if (!Store.removeProduto(dl.dataset.del))
+        return toast('Este produto está em um modelo de venda recorrente. Remova-o do modelo antes.', 'err');
+      if (prodEdit === dl.dataset.del) clearForm();
+      toast('Produto excluído.', 'ok'); renderRows();
+    }
+  });
+  // Isenção zera o ICMS na hora, para o formulário não mostrar dois estados em conflito.
+  document.getElementById('pIsento').addEventListener('change', e=>{
+    const icms = document.getElementById('pIcms');
+    icms.disabled = e.target.checked;
+    if (e.target.checked) icms.value = 0;
+  });
+  renderRows();
+  wireShell();
+}
+
 /* ---------- Consultar Nota / Histórico (US09) ---------- */
-let consFiltro = { status:'', busca:'' };
+let consFiltro = { status:'', busca:'', periodo:'tudo', de:'', ate:'' };
 function viewConsultar(){
   const content = `
     <div class="page-head">
-      <h2>Consultar Notas</h2>
-      <button class="btn" id="btnZip">${ICON.download} Exportar .ZIP</button>
+      <div>
+        <h2>Consultar Notas</h2>
+        <p class="page-sub">Histórico completo em nuvem. Exporte várias notas de uma vez, em um <b>único pacote .zip</b>.</p>
+      </div>
+      <button class="btn" id="btnZip" title="Baixar as notas autorizadas do filtro atual em um pacote .zip">${ICON.download} Exportar pacote .zip</button>
     </div>
     <div class="card" style="margin-bottom:22px">
       <div class="row">
-        <div class="field" style="margin:0"><label>Buscar</label>
+        <div class="field" style="margin:0"><label for="qBusca">Buscar</label>
           <input class="input" id="qBusca" placeholder="Número ou destinatário…"></div>
-        <div class="field" style="margin:0;max-width:220px"><label>Status</label>
-          <select class="input" id="qStatus"><option value="">Todos</option><option>Autorizada</option><option>Rejeitada</option></select></div>
+        <div class="field" style="margin:0;max-width:220px"><label for="qPeriodo">Período</label>
+          <select class="input" id="qPeriodo">
+            ${PERIODOS.map(p=>`<option value="${p.v}" ${p.v===consFiltro.periodo?'selected':''}>${p.label}</option>`).join('')}
+          </select></div>
+        <div class="field" style="margin:0;max-width:220px"><label for="qStatus">Status</label>
+          <select class="input" id="qStatus">
+            <option value="">Todos</option><option>Autorizada</option><option>Rejeitada</option><option>Cancelada</option>
+          </select></div>
       </div>
+      <div class="row" id="qRange" style="margin-top:18px" ${consFiltro.periodo==='custom'?'':'hidden'}>
+        <div class="field" style="margin:0;max-width:220px"><label for="qDe">Data inicial</label>
+          <input class="input" id="qDe" type="date" value="${consFiltro.de}"></div>
+        <div class="field" style="margin:0;max-width:220px"><label for="qAte">Data final</label>
+          <input class="input" id="qAte" type="date" value="${consFiltro.ate}"></div>
+        <div class="field" style="margin:0;align-self:end">
+          <button class="btn ghost" type="button" id="qLimparData">Limpar datas</button></div>
+      </div>
+      <div id="qAvisoData" class="aviso warn" hidden></div>
     </div>
     <div class="table-card">
+      <div class="card-head">
+        <h3 id="consCount">Notas encontradas</h3>
+      </div>
       <div style="overflow-x:auto">
         <table class="tbl"><thead><tr>
-          <th>Número</th><th>Destinatário</th><th>Valor</th><th>Data</th><th>Hora</th><th>Status</th><th>Chave de acesso</th><th></th>
+          <th>Número</th><th>Destinatário</th><th>Valor</th><th>Data</th><th>Hora</th><th>Status</th><th>Chave de acesso</th><th>Ações</th>
         </tr></thead><tbody id="consRows"></tbody></table>
       </div>
     </div>`;
@@ -437,57 +778,114 @@ function viewConsultar(){
 
   function list(){
     const q=consFiltro.busca.trim().toLowerCase();
-    return Store.notas.filter(n=>
+    return filtrarNotas(consFiltro.periodo, Store.notas, consFiltro).filter(n=>
       (!consFiltro.status || n.status===consFiltro.status) &&
       (!q || String(n.numero).includes(q) || n.cliente.toLowerCase().includes(q)));
   }
+  /* O intervalo invertido antes zerava a lista sem explicar por quê. */
+  function avisoData(){
+    const el = document.getElementById('qAvisoData');
+    const invertido = consFiltro.periodo==='custom' && consFiltro.de && consFiltro.ate
+      && parseISO(consFiltro.de) > parseISO(consFiltro.ate);
+    el.hidden = !invertido;
+    if (invertido) el.textContent = 'A data inicial é posterior à data final. Inverta as datas para ver resultados.';
+    return invertido;
+  }
   function renderRows(){
+    avisoData();
     const l=list();
+    document.getElementById('consCount').textContent =
+      l.length ? `${l.length} nota${l.length>1?'s':''} encontrada${l.length>1?'s':''}` : 'Nenhuma nota encontrada';
     document.getElementById('consRows').innerHTML = l.length ? l.map(n=>`
       <tr>
         <td>${n.numero}</td><td>${esc(n.cliente)}</td><td>${BRL(n.valor)}</td>
         <td>${n.data}</td><td>${n.hora||'—'}</td><td>${statusBadge(n.status)}</td>
-        <td style="font-size:14px;color:#555">${esc(n.chave)}</td>
-        <td>${n.status==='Autorizada'?`<button class="iconbtn" data-xml="${n.numero}" title="Baixar XML">${ICON.download}</button>`:''}</td>
-      </tr>`).join('') : `<tr><td colspan="8" class="muted center">Nenhuma nota encontrada.</td></tr>`;
+        <td class="chave">${esc(n.chave)}</td>
+        <td><div class="actions">${n.status==='Autorizada'?`
+          <button class="iconbtn" data-xml="${n.numero}" aria-label="Baixar arquivo da nota ${n.numero}" title="Baixar arquivo da nota">${ICON.download}</button>
+          <button class="iconbtn del" data-cancel="${n.numero}" aria-label="Cancelar nota ${n.numero}" title="Cancelar nota">${ICON.cancelar}</button>`:''}
+        </div></td>
+      </tr>`).join('') : `<tr><td colspan="8" class="muted center">Nenhuma nota encontrada com esses filtros.</td></tr>`;
   }
-  const dl=(name,content,type)=>{ const b=new Blob([content],{type}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download=name; a.click(); URL.revokeObjectURL(u); };
+  const baixarBlob=(name,blob)=>{ const u=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=u; a.download=name; a.click(); URL.revokeObjectURL(u); };
+  const dl=(name,content,type)=> baixarBlob(name, new Blob([content],{type}));
   const xmlOf=n=>`<?xml version="1.0" encoding="UTF-8"?>\n<nfeProc versao="4.00">\n  <NFe><infNFe>\n    <ide><nNF>${n.numero}</nNF><dhEmi>${n.data} ${n.hora||''}</dhEmi></ide>\n    <dest><xNome>${esc(n.cliente)}</xNome></dest>\n    <total><vNF>${n.valor.toFixed(2)}</vNF></total>\n    <status>${n.status}</status><chNFe>${n.chave.replace(/\\s/g,'')}</chNFe>\n  </infNFe></NFe>\n</nfeProc>`;
 
   document.getElementById('qBusca').addEventListener('input', e=>{consFiltro.busca=e.target.value;renderRows();});
   document.getElementById('qStatus').addEventListener('change', e=>{consFiltro.status=e.target.value;renderRows();});
-  document.getElementById('consRows').addEventListener('click', e=>{
-    const x=e.target.closest('[data-xml]'); if(x){ const n=Store.notas.find(n=>n.numero==x.dataset.xml); dl(`NFe-${n.numero}.xml`, xmlOf(n),'application/xml'); toast(`XML da nota ${n.numero} baixado.`, 'ok'); }
+  document.getElementById('qPeriodo').addEventListener('change', e=>{
+    consFiltro.periodo=e.target.value;
+    document.getElementById('qRange').hidden = consFiltro.periodo!=='custom';
+    renderRows();
   });
+  document.getElementById('qDe').addEventListener('change', e=>{consFiltro.de=e.target.value;renderRows();});
+  document.getElementById('qAte').addEventListener('change', e=>{consFiltro.ate=e.target.value;renderRows();});
+  document.getElementById('qLimparData').addEventListener('click', ()=>{
+    consFiltro.de=''; consFiltro.ate='';
+    document.getElementById('qDe').value=''; document.getElementById('qAte').value='';
+    renderRows();
+  });
+  document.getElementById('consRows').addEventListener('click', e=>{
+    const x=e.target.closest('[data-xml]');
+    if(x){
+      const n=Store.notas.find(n=>n.numero==x.dataset.xml);
+      dl(`NFe-${n.numero}.xml`, xmlOf(n),'application/xml');
+      return toast(`Arquivo da nota ${n.numero} baixado.`, 'ok');
+    }
+    const c=e.target.closest('[data-cancel]');
+    if(c){
+      const n=Store.cancelarNota(c.dataset.cancel);
+      if(!n) return toast('Só notas autorizadas podem ser canceladas.', 'err');
+      toast(`Nota ${n.numero} cancelada. O registro é mantido no histórico.`, 'ok');
+      renderRows();
+    }
+  });
+  // US09 — os XMLs autorizados saem em UM pacote .zip, não em vários downloads.
   document.getElementById('btnZip').addEventListener('click', ()=>{
     const aut=list().filter(n=>n.status==='Autorizada');
-    if(!aut.length) return toast('Nenhuma nota autorizada para exportar.', 'err');
-    dl(`NFe-pacote-${aut.length}-notas.xml`, aut.map(xmlOf).join('\n\n'), 'application/xml');
-    toast(`Pacote com ${aut.length} XML(s) gerado (simulação do .ZIP).`, 'ok');
+    if(!aut.length) return toast('Nenhuma nota autorizada no filtro atual para exportar.', 'err');
+    const zip = Zip.criar(aut.map(n => ({ nome:`NFe-${n.numero}.xml`, conteudo:xmlOf(n) })));
+    baixarBlob(`NFe-pacote-${aut.length}-notas.zip`, zip);
+    toast(`Pacote .zip com ${aut.length} nota(s) gerado.`, 'ok');
   });
   renderRows();
   wireShell();
 }
 
 /* ---------- Relatórios (US11 — soma total por período) ---------- */
+let relPeriodo = 'mes';
 function viewRelatorios(){
-  const aut = Store.notas.filter(n=>n.status==='Autorizada');
-  const soma = aut.reduce((s,n)=>s+n.valor,0);
-  const rej = Store.notas.filter(n=>n.status==='Rejeitada').length;
   const content = `
-    <div class="page-head"><h2>Relatório Financeiro Consolidado</h2>
-      <span class="pill">Período: <select><option>Este mês</option><option>Últimos 7 dias</option><option>Ano</option></select></span>
+    <div class="page-head">
+      <div>
+        <h2>Relatório Financeiro Consolidado</h2>
+        <p class="page-sub">Soma total das notas por período — como solicitado na entrevista.</p>
+      </div>
+      ${periodoPill('relPeriodo', relPeriodo)}
     </div>
-    <div class="card card-lg" style="text-align:center;margin-bottom:22px">
-      <p class="muted" style="font-size:18px;margin-bottom:8px">Faturamento total no período (notas autorizadas)</p>
-      <div style="font-size:64px;font-weight:800;color:var(--accent)">${BRL(soma)}</div>
+    <div class="card card-lg total-card" style="margin-bottom:22px">
+      <p class="total-card__lbl">Faturamento total no período <span id="relRot"></span></p>
+      <div class="total-card__num" id="relSoma">R$ 0,00</div>
+      <p class="muted total-card__hint">Considera apenas notas autorizadas.</p>
     </div>
-    <div class="stats" style="grid-template-columns:repeat(3,1fr)">
-      ${statCard('Notas autorizadas', aut.length)}
-      ${statCard('Notas rejeitadas', rej, {neg:rej>0})}
-      ${statCard('Ticket médio', aut.length?soma/aut.length:0, {money:true})}
-    </div>`;
+    <div class="stats" id="relStats" style="grid-template-columns:repeat(3,1fr)"></div>`;
   app.innerHTML = shell('#relatorios', content);
+
+  const render = () => {
+    const sel  = filtrarNotas(relPeriodo);
+    const aut  = sel.filter(n=>n.status==='Autorizada');
+    const rej  = sel.filter(n=>n.status==='Rejeitada').length;
+    const soma = aut.reduce((s,n)=>s+n.valor,0);
+    document.getElementById('relRot').textContent  = `(${rotuloPeriodo(relPeriodo).toLowerCase()})`;
+    document.getElementById('relSoma').textContent = BRL(soma);
+    document.getElementById('relStats').innerHTML = [
+      statCard('Notas autorizadas', aut.length),
+      statCard('Notas rejeitadas',  rej, {neg:true}),
+      statCard('Ticket médio',      aut.length?soma/aut.length:0, {money:true}),
+    ].join('');
+  };
+  wirePeriodo('relPeriodo', relPeriodo, v => { relPeriodo = v; render(); });
+  render();
   wireShell();
 }
 
@@ -497,7 +895,7 @@ function viewConfig(){
   const content = `
     <div class="page-head"><h2>Configurações</h2></div>
     <div class="card card-lg" style="margin-bottom:22px">
-      <h3 style="font-size:20px;margin-bottom:18px">Perfil do Emissor</h3>
+      <div class="card-head"><h3>Perfil do Emissor</h3></div>
       <div class="row">
         <div class="field"><label>Razão Social</label><input class="input" id="sRazao" value="${esc(e.razaoSocial)}"></div>
         <div class="field"><label>CNPJ</label><input class="input" id="sCnpj" value="${esc(e.cnpj)}"></div>
@@ -507,7 +905,7 @@ function viewConfig(){
       <p class="muted" style="font-size:14px">O certificado expira em <b>${esc(e.certificadoValidade)}</b>. Renove antes do vencimento.</p>
     </div>
     <div class="card card-lg" style="margin-bottom:22px">
-      <h3 style="font-size:20px;margin-bottom:18px">Emissão &amp; Contingência</h3>
+      <div class="card-head"><h3>Emissão e Contingência</h3></div>
       <div class="row">
         <div class="field"><label>Provedor padrão</label>
           <select class="input" id="sProv"><option ${c.provedorPadrao==='Sebrae'?'selected':''}>Sebrae</option><option ${c.provedorPadrao==='Sefaz'?'selected':''}>Sefaz</option></select></div>
@@ -516,21 +914,123 @@ function viewConfig(){
       </div>
     </div>
     <div class="card card-lg" style="margin-bottom:22px">
-      <h3 style="font-size:20px;margin-bottom:18px">Notificações &amp; Cobrança</h3>
-      <div class="field"><label>E-mail de notificação por emissão</label><input class="input" id="sEmail" value="${esc(c.emailNotificacao)}"></div>
-      <label style="display:flex;gap:10px;align-items:center;font-weight:500;cursor:pointer">
-        <input type="checkbox" id="sBoleto" ${c.boletoAtivo?'checked':''}> Gerar boleto automaticamente ao autorizar a nota
-      </label>
+      <div class="card-head"><h3>Cobrança e avisos</h3></div>
+      <p class="muted" style="margin:0">
+        A geração de boleto junto da nota e o e-mail de aviso a cada emissão são configurados em
+        <a href="#integracoes">Integrações</a>.
+      </p>
     </div>
     <button class="btn" id="sSave">${ICON.save} Salvar configurações</button>`;
   app.innerHTML = shell('#config', content);
   document.getElementById('sSave').addEventListener('click', ()=>{
-    Store.cfg.emailNotificacao=document.getElementById('sEmail').value;
-    Store.cfg.boletoAtivo=document.getElementById('sBoleto').checked;
-    Store.cfg.provedorPadrao=document.getElementById('sProv').value;
-    Store.cfg.provedorContingencia=document.getElementById('sCont').value;
+    const padrao = document.getElementById('sProv').value;
+    const cont   = document.getElementById('sCont').value;
+    if (padrao === cont)
+      return toast('O serviço de contingência precisa ser diferente do padrão.', 'err');
+    Store.emissor.razaoSocial = document.getElementById('sRazao').value.trim();
+    Store.emissor.cnpj = document.getElementById('sCnpj').value.trim();
+    Store.emissor.certificadoValidade = document.getElementById('sCert').value.trim();
+    Store.cfg.provedorPadrao = padrao;
+    Store.cfg.provedorContingencia = cont;
     toast('Configurações salvas.', 'ok');
   });
+  wireShell();
+}
+
+/* ---------- Integrações (US08 failover + US10 cobrança + US12 aviso) --------
+   Esta tela era um placeholder "em construção" — apontado no Teste de
+   Usabilidade como menu sem funcionalidade. Agora demonstra o failover.      */
+function viewIntegracoes(){
+  const c = Store.cfg;
+  const content = `
+    <div class="page-head">
+      <div>
+        <h2>Integrações</h2>
+        <p class="page-sub">Serviços usados para transmitir a nota e para gerar a cobrança.</p>
+      </div>
+    </div>
+
+    <div class="card card-lg" style="margin-bottom:22px">
+      <div class="card-head">
+        <h3>Serviços de emissão</h3>
+        <button class="btn ghost sm" id="btnSimular">Simular falha do serviço padrão</button>
+      </div>
+      <p class="muted" style="margin:0 0 18px">
+        O sistema envia a nota para o serviço padrão. Se ele estiver fora do ar, a mesma nota é
+        reenviada automaticamente para o serviço de contingência, sem que você precise preencher nada de novo.
+      </p>
+      <div id="provList"></div>
+      <div id="provAviso" class="aviso" hidden></div>
+    </div>
+
+    <div class="card card-lg" style="margin-bottom:22px">
+      <div class="card-head"><h3>Cobrança — boleto bancário</h3></div>
+      <p class="muted" style="margin:0 0 16px">
+        Quando ativado, o boleto é gerado assim que a nota é autorizada, com o
+        <b>mesmo valor</b> e a <b>mesma data de vencimento</b> da nota.
+      </p>
+      <label class="check">
+        <input type="checkbox" id="iBoleto" ${c.boletoAtivo?'checked':''}>
+        <span>Gerar boleto automaticamente ao autorizar a nota</span>
+      </label>
+      <p class="muted" style="font-size:14px;margin-top:12px">
+        O boleto nunca é gerado antes da autorização — uma nota rejeitada não gera cobrança.
+      </p>
+    </div>
+
+    <div class="card card-lg">
+      <div class="card-head"><h3>Aviso por e-mail</h3></div>
+      <div class="field" style="max-width:420px">
+        <label for="iEmail">E-mail avisado a cada nota emitida</label>
+        <input class="input" id="iEmail" value="${esc(c.emailNotificacao)}">
+      </div>
+      <p class="muted" style="font-size:14px;margin:0">
+        O aviso traz número, destinatário, valor e a chave de acesso da nota.
+      </p>
+    </div>`;
+  app.innerHTML = shell('#integracoes', content);
+
+  const renderProv = () => {
+    document.getElementById('provList').innerHTML = Store.provedores.map(p => {
+      const ehPadrao = p.nome === c.provedorPadrao;
+      const online = p.status === 'Online';
+      return `<div class="prov prov--row">
+        <div>
+          <div class="name">${esc(p.nome)}</div>
+          <div class="muted" style="font-size:14px">${ehPadrao?'Serviço padrão':'Serviço de contingência'}</div>
+        </div>
+        <div class="st ${online?'on':'off'}">${p.status}</div>
+      </div>`;
+    }).join('');
+  };
+  document.getElementById('btnSimular').addEventListener('click', () => {
+    const padrao = Store.provedores.find(p => p.nome === c.provedorPadrao);
+    const backup = Store.provedores.find(p => p.nome === c.provedorContingencia);
+    const aviso  = document.getElementById('provAviso');
+    if (!padrao || !backup) return;
+    if (padrao.status === 'Online'){
+      padrao.status = 'Indisponível';
+      aviso.hidden = false; aviso.className = 'aviso warn';
+      aviso.innerHTML = `<b>${esc(padrao.nome)} está fora do ar.</b> As próximas notas serão transmitidas
+        por <b>${esc(backup.nome)}</b> automaticamente, com a mesma estrutura de dados.`;
+      toast(`Falha em ${padrao.nome}. Contingência ${backup.nome} assumiu.`, 'ok');
+    } else {
+      padrao.status = 'Online';
+      aviso.hidden = false; aviso.className = 'aviso ok';
+      aviso.innerHTML = `<b>${esc(padrao.nome)} voltou a responder.</b> A transmissão retornou ao serviço padrão.`;
+      toast(`${padrao.nome} restabelecido.`, 'ok');
+    }
+    renderProv();
+  });
+  document.getElementById('iBoleto').addEventListener('change', e => {
+    Store.cfg.boletoAtivo = e.target.checked;
+    toast(e.target.checked ? 'Boleto será gerado junto da nota.' : 'Geração de boleto desativada.', 'ok');
+  });
+  document.getElementById('iEmail').addEventListener('change', e => {
+    Store.cfg.emailNotificacao = e.target.value.trim();
+    toast('E-mail de aviso atualizado.', 'ok');
+  });
+  renderProv();
   wireShell();
 }
 
@@ -558,15 +1058,17 @@ function wireShell(){
 
 const ROUTES = {
   '#login': viewLogin,
+  '#recuperar': viewRecuperar,
   '#dashboard': viewDashboard,
   '#dashboard2': viewDashboard2,
   '#emitir': viewEmitir,
   '#clientes': viewClientes,
+  '#produtos': viewProdutos,
   '#consultar': viewConsultar,
+  '#integracoes': viewIntegracoes,
   '#relatorios': viewRelatorios,
   '#config': viewConfig,
-  '#integracoes': () => viewPlaceholder('#integracoes','Integrações','🔗','Conexões com APIs de cobrança, ERPs e webhooks. Em construção neste protótipo.'),
-  '#ajuda': () => viewPlaceholder('#ajuda','Ajuda','💬','Central de ajuda e suporte. Em construção neste protótipo.'),
+  '#ajuda': () => viewPlaceholder('#ajuda','Ajuda','💬','Central de ajuda e suporte. Fora do escopo acordado com o cliente nesta versão.'),
 };
 
 function router(){
