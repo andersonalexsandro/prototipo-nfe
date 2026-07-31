@@ -126,7 +126,7 @@ function statCard(title, value, {money=false, neg=false, delta='', primary=false
     : `<div class="num${alerta?' neg':''}">${Number(value).toLocaleString('pt-BR')}</div>`;
   return `<div class="stat${primary?' stat--primary':''}"><h4>${title}</h4>${num}${delta?`<div class="delta">${delta}</div>`:''}</div>`;
 }
-const STATUS_CLASS = { 'Autorizada':'ok', 'Rejeitada':'no', 'Cancelada':'warn' };
+const STATUS_CLASS = { 'Autorizada':'ok', 'Rejeitada':'no', 'Cancelada':'warn', 'Pendente':'warn' };
 function statusBadge(s){ return `<span class="status ${STATUS_CLASS[s]||'no'}">${s}</span>`; }
 
 /* ---------- Filtro de período (componente único) ----------------------------
@@ -218,11 +218,12 @@ function viewDashboard(){
       <div class="side-cards">
         <div class="mini-card">
           <h4>Status dos Provedores</h4>
-          ${Store.provedores.map(p=>`
-            <div class="prov">
+          ${Store.provedores.map(p=>{
+            const online = p.status === 'Online';
+            return `<div class="prov">
               <div class="name">${esc(p.nome)}${p.tag?` <span class="muted prov__tag">(${p.tag})</span>`:''}</div>
-              <div class="st on">${p.status}</div>
-            </div>`).join('')}
+              <div class="st ${online?'on':'off'}">${online?'Funcionando':'Fora do ar'}</div>
+            </div>`;}).join('')}
         </div>
         <div class="mini-card">
           <h4>Alertas Recentes</h4>
@@ -475,8 +476,13 @@ function viewEmitir(){
     if (!cli) return toast('Selecione um cliente para a nota.', 'err');
     if (!emitState.itens.length || emitState._total<=0) return toast('Adicione ao menos um item válido.', 'err');
     const nota = Store.emitirNota({ cliente: cli.nome, valor: emitState._total });
-    if (nota.status==='Autorizada') toast(`Nota ${nota.numero} autorizada! ${BRL(nota.valor)}`, 'ok');
-    else toast(`Nota ${nota.numero} rejeitada pela SEFAZ. Revise os dados.`, 'err');
+    if (nota.status==='Pendente')
+      toast(`Os serviços de emissão estão fora do ar. A nota ${nota.numero} foi guardada e você pode enviá-la de novo em Consultar Notas, sem preencher nada.`, 'err');
+    else if (nota.status==='Autorizada')
+      toast(nota.porContingencia
+        ? `Nota ${nota.numero} autorizada! ${BRL(nota.valor)} — o serviço padrão estava fora do ar e ela foi enviada pelo ${nota.provedor}.`
+        : `Nota ${nota.numero} autorizada! ${BRL(nota.valor)} — enviada por ${nota.provedor}.`, 'ok');
+    else toast(`Nota ${nota.numero} rejeitada. Revise os dados.`, 'err');
     emitState = { clienteId:'', itens:[] };
     setTimeout(()=>{ location.hash='#consultar'; }, 700);
   });
@@ -770,7 +776,7 @@ function viewConsultar(){
       </div>
       <div style="overflow-x:auto">
         <table class="tbl"><thead><tr>
-          <th>Número</th><th>Destinatário</th><th>Valor</th><th>Data</th><th>Hora</th><th>Status</th><th>Chave de acesso</th><th>Ações</th>
+          <th>Número</th><th>Destinatário</th><th>Valor</th><th>Data</th><th>Hora</th><th>Status</th><th>Transmitida por</th><th>Chave de acesso</th><th>Ações</th>
         </tr></thead><tbody id="consRows"></tbody></table>
       </div>
     </div>`;
@@ -800,12 +806,14 @@ function viewConsultar(){
       <tr>
         <td>${n.numero}</td><td>${esc(n.cliente)}</td><td>${BRL(n.valor)}</td>
         <td>${n.data}</td><td>${n.hora||'—'}</td><td>${statusBadge(n.status)}</td>
+        <td>${esc(n.provedor||'—')}${n.porContingencia?` <span class="tag tag--warn" title="O serviço padrão estava fora do ar e esta nota foi transmitida pelo serviço reserva">reserva</span>`:''}</td>
         <td class="chave">${esc(n.chave)}</td>
         <td><div class="actions">${n.status==='Autorizada'?`
           <button class="iconbtn" data-xml="${n.numero}" aria-label="Baixar arquivo da nota ${n.numero}" title="Baixar arquivo da nota">${ICON.download}</button>
-          <button class="iconbtn del" data-cancel="${n.numero}" aria-label="Cancelar nota ${n.numero}" title="Cancelar nota">${ICON.cancelar}</button>`:''}
+          <button class="iconbtn del" data-cancel="${n.numero}" aria-label="Cancelar nota ${n.numero}" title="Cancelar nota">${ICON.cancelar}</button>`:''}${n.status==='Pendente'?`
+          <button class="btn soft sm" data-retry="${n.numero}" title="Tentar enviar esta nota de novo, sem preencher nada">Enviar de novo</button>`:''}
         </div></td>
-      </tr>`).join('') : `<tr><td colspan="8" class="muted center">Nenhuma nota encontrada com esses filtros.</td></tr>`;
+      </tr>`).join('') : `<tr><td colspan="9" class="muted center">Nenhuma nota encontrada com esses filtros.</td></tr>`;
   }
   const baixarBlob=(name,blob)=>{ const u=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=u; a.download=name; a.click(); URL.revokeObjectURL(u); };
   const dl=(name,content,type)=> baixarBlob(name, new Blob([content],{type}));
@@ -831,6 +839,16 @@ function viewConsultar(){
       const n=Store.notas.find(n=>n.numero==x.dataset.xml);
       dl(`NFe-${n.numero}.xml`, xmlOf(n),'application/xml');
       return toast(`Arquivo da nota ${n.numero} baixado.`, 'ok');
+    }
+    const r=e.target.closest('[data-retry]');
+    if(r){
+      const n=Store.retransmitirNota(r.dataset.retry);
+      if(n && n.status==='Pendente')
+        return toast('Os dois serviços continuam fora do ar. A nota segue guardada.', 'err');
+      if(n && n.status==='Autorizada')
+        toast(`Nota ${n.numero} autorizada por ${n.provedor}${n.porContingencia?' (serviço reserva)':''}.`, 'ok');
+      else if(n) toast(`Nota ${n.numero} rejeitada. Revise os dados.`, 'err');
+      return renderRows();
     }
     const c=e.target.closest('[data-cancel]');
     if(c){
@@ -953,11 +971,16 @@ function viewIntegracoes(){
     <div class="card card-lg" style="margin-bottom:22px">
       <div class="card-head">
         <h3>Serviços de emissão</h3>
-        <button class="btn ghost sm" id="btnSimular">Simular falha do serviço padrão</button>
       </div>
       <p class="muted" style="margin:0 0 18px">
-        O sistema envia a nota para o serviço padrão. Se ele estiver fora do ar, a mesma nota é
-        reenviada automaticamente para o serviço de contingência, sem que você precise preencher nada de novo.
+        Sua nota precisa ser aprovada por um serviço do governo antes de valer. O NFCloud usa dois:
+        um principal e um reserva. Se o principal não responder, a nota vai pelo reserva
+        <b>sozinha</b> — você não preenche nada de novo e nem precisa saber que aconteceu.
+        Se os dois estiverem fora, a nota fica guardada do jeito que você deixou, e é só mandar
+        de novo depois.
+      </p>
+      <p class="muted" style="margin:0 0 18px;font-size:14px">
+        Use os botões abaixo para derrubar um serviço e ver o que acontece ao emitir uma nota.
       </p>
       <div id="provList"></div>
       <div id="provAviso" class="aviso" hidden></div>
@@ -997,29 +1020,45 @@ function viewIntegracoes(){
       return `<div class="prov prov--row">
         <div>
           <div class="name">${esc(p.nome)}</div>
-          <div class="muted" style="font-size:14px">${ehPadrao?'Serviço padrão':'Serviço de contingência'}</div>
+          <div class="muted" style="font-size:14px">${ehPadrao?'Serviço principal':'Serviço reserva'}</div>
         </div>
-        <div class="st ${online?'on':'off'}">${p.status}</div>
+        <div class="prov__acoes">
+          <div class="st ${online?'on':'off'}">${online?'Funcionando':'Fora do ar'}</div>
+          <button class="btn ghost sm" data-toggle="${esc(p.nome)}">
+            ${online?'Derrubar':'Restabelecer'}
+          </button>
+        </div>
       </div>`;
     }).join('');
-  };
-  document.getElementById('btnSimular').addEventListener('click', () => {
+
+    // O aviso explica em que situação a emissão está agora, sem jargão.
     const padrao = Store.provedores.find(p => p.nome === c.provedorPadrao);
     const backup = Store.provedores.find(p => p.nome === c.provedorContingencia);
-    const aviso  = document.getElementById('provAviso');
-    if (!padrao || !backup) return;
-    if (padrao.status === 'Online'){
-      padrao.status = 'Indisponível';
-      aviso.hidden = false; aviso.className = 'aviso warn';
-      aviso.innerHTML = `<b>${esc(padrao.nome)} está fora do ar.</b> As próximas notas serão transmitidas
-        por <b>${esc(backup.nome)}</b> automaticamente, com a mesma estrutura de dados.`;
-      toast(`Falha em ${padrao.nome}. Contingência ${backup.nome} assumiu.`, 'ok');
+    const aviso = document.getElementById('provAviso');
+    aviso.hidden = false;
+    if (padrao?.status === 'Online'){
+      aviso.className = 'aviso ok';
+      aviso.innerHTML = `<b>Tudo normal.</b> As notas estão indo por <b>${esc(padrao.nome)}</b>.`;
+    } else if (backup?.status === 'Online'){
+      aviso.className = 'aviso warn';
+      aviso.innerHTML = `<b>${esc(padrao.nome)} está fora do ar.</b> Suas notas estão indo por
+        <b>${esc(backup.nome)}</b> automaticamente. Emita uma nota e veja: ela é autorizada do mesmo
+        jeito, e o histórico mostra que passou pelo serviço reserva.`;
     } else {
-      padrao.status = 'Online';
-      aviso.hidden = false; aviso.className = 'aviso ok';
-      aviso.innerHTML = `<b>${esc(padrao.nome)} voltou a responder.</b> A transmissão retornou ao serviço padrão.`;
-      toast(`${padrao.nome} restabelecido.`, 'ok');
+      aviso.className = 'aviso warn';
+      aviso.innerHTML = `<b>Os dois serviços estão fora do ar.</b> Nenhuma nota é aprovada agora, mas
+        nada se perde: a nota que você emitir fica guardada como <b>Pendente</b> em Consultar Notas,
+        com tudo o que você preencheu, e é só clicar em “Enviar de novo” quando voltarem.`;
     }
+  };
+
+  document.getElementById('provList').addEventListener('click', e => {
+    const btn = e.target.closest('[data-toggle]');
+    if (!btn) return;
+    const p = Store.provedores.find(p => p.nome === btn.dataset.toggle);
+    if (!p) return;
+    p.status = p.status === 'Online' ? 'Indisponível' : 'Online';
+    toast(p.status === 'Online' ? `${p.nome} voltou a funcionar.` : `${p.nome} saiu do ar.`, 'ok');
     renderProv();
   });
   document.getElementById('iBoleto').addEventListener('change', e => {

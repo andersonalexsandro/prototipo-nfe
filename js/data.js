@@ -41,6 +41,7 @@ const Store = (() => {
      Usabilidade de 14/07/2026.                                              */
   const pad   = n => String(n).padStart(2, '0');
   const fmtBR = d => `${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()}`;
+  const deBR  = s => { const [d,m,y] = s.split('/').map(Number); return new Date(y, m-1, d); };
   const HOJE  = (() => { const d = new Date(); d.setHours(0,0,0,0); return d; })();
   const diasAtras = n => { const d = new Date(HOJE); d.setDate(d.getDate() - n); return d; };
   const chaveDe = (d, numero) =>
@@ -59,7 +60,14 @@ const Store = (() => {
   ];
   let notas = seed.map(({ dias, ...n }) => {
     const d = diasAtras(dias);
-    return { ...n, data: fmtBR(d), chave: n.status === 'Autorizada' ? chaveDe(d, n.numero) : '—' };
+    return {
+      ...n,
+      data: fmtBR(d),
+      chave: n.status === 'Autorizada' ? chaveDe(d, n.numero) : '—',
+      // Toda nota registra por qual serviço foi transmitida (RN08).
+      provedor: n.status === 'Rejeitada' ? '—' : 'Sebrae',
+      porContingencia: false,
+    };
   });
 
   /* Modelos de venda recorrente (US07) — o cliente repete as mesmas vendas
@@ -148,22 +156,61 @@ const Store = (() => {
     removeModelo(id){ modelos = modelos.filter(m => m.id !== id); },
     findModelo(id){ return modelos.find(m => m.id === id); },
 
+    /* RN08 / UC05 — Escolhe o serviço de transmissão: o padrão quando está no ar,
+       o de contingência quando não está. A nota transmitida é a mesma, sem
+       alteração de dados. Se nenhum dos dois responder, ela não é perdida:
+       fica pendente e pode ser retransmitida sem novo preenchimento. */
+    _rotear(){
+      const padrao = provedores.find(p => p.nome === cfg.provedorPadrao);
+      const backup = provedores.find(p => p.nome === cfg.provedorContingencia);
+      if (padrao && padrao.status === 'Online') return { via: padrao.nome, porContingencia: false };
+      if (backup && backup.status === 'Online') return { via: backup.nome, porContingencia: true };
+      return { via: null, porContingencia: false };
+    },
+
     emitirNota({ cliente, valor }){
       seqNota += 1;
-      // ~85% autorizada, resto rejeitada — simula retorno da SEFAZ/Sebrae
-      const aut = Math.random() > 0.15;
       const now = new Date();
-      const nota = {
+      const { via, porContingencia } = this._rotear();
+      const base = {
         numero: seqNota,
         cliente,
         valor,
         data: fmtBR(now),
         hora: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
+      };
+
+      if (!via){
+        const nota = { ...base, status: 'Pendente', chave: '—', provedor: '—', porContingencia: false };
+        notas.unshift(nota);
+        return nota;
+      }
+
+      // ~85% autorizada, resto rejeitada — simula o retorno do serviço
+      const aut = Math.random() > 0.15;
+      const nota = {
+        ...base,
         status: aut ? 'Autorizada' : 'Rejeitada',
         chave: aut ? chaveDe(now, seqNota) : '—',
+        provedor: aut ? via : '—',
+        porContingencia,
       };
       notas.unshift(nota);
       return nota;   // headline é derivada de `notas`, não precisa de contador manual
+    },
+
+    /* US08 — retransmite uma nota que ficou pendente, sem refazer o preenchimento. */
+    retransmitirNota(numero){
+      const n = notas.find(n => n.numero === Number(numero));
+      if (!n || n.status !== 'Pendente') return null;
+      const { via, porContingencia } = this._rotear();
+      if (!via) return n;                       // segue pendente
+      const aut = Math.random() > 0.15;
+      n.status = aut ? 'Autorizada' : 'Rejeitada';
+      n.chave = aut ? chaveDe(deBR(n.data), n.numero) : '—';
+      n.provedor = aut ? via : '—';
+      n.porContingencia = porContingencia;
+      return n;
     },
 
     /* RN08 — nota autorizada não pode ser excluída, apenas cancelada. */

@@ -213,6 +213,9 @@ h1,h2,h3,h4{margin:0;font-weight:700}
 .prov--row{display:flex;align-items:center;justify-content:space-between;gap:16px;
   padding:16px 0;border-bottom:1px solid var(--line);margin:0}
 .prov--row:last-of-type{border-bottom:none}
+.prov__acoes{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+/* Selo de nota transmitida pelo serviço reserva */
+.tag--warn{background:#FDF3E3;color:var(--warn)}
 .alert-line{font-size:15px;color:#333;margin:10px 0;line-height:1.45}
 
 /* Cartão de total do relatório */
